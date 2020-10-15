@@ -28,6 +28,7 @@ import net.dries007.holoInventory.util.Coord;
 import net.dries007.holoInventory.util.Helper;
 import net.dries007.holoInventory.util.NamedData;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.ActiveRenderInfo;
 import net.minecraft.client.renderer.RenderHelper;
 import net.minecraft.client.renderer.Tessellator;
 import net.minecraft.client.renderer.entity.RenderManager;
@@ -40,9 +41,11 @@ import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.StatCollector;
 import net.minecraft.village.MerchantRecipe;
 import net.minecraft.village.MerchantRecipeList;
-import net.minecraftforge.client.event.RenderWorldLastEvent;
+import net.minecraftforge.client.event.RenderGameOverlayEvent;
 import org.lwjgl.opengl.GL12;
 
+import java.lang.reflect.Field;
+import java.nio.FloatBuffer;
 import java.text.DecimalFormat;
 import java.util.*;
 
@@ -72,7 +75,7 @@ public class Renderer
     }
 
     @SubscribeEvent
-    public void renderEvent(RenderWorldLastEvent event)
+    public void renderEvent(RenderGameOverlayEvent event) // change to RenderGameOverlayEvent so shaders don't effect the render.
     {
         try
         {
@@ -293,11 +296,42 @@ public class Renderer
      */
     private void doRenderHologram(String name, List<ItemStack> itemStacks, double distance)
     {
-        // Move to right position and rotate to face the player
-        glPushMatrix();
+        // not sure why blending is happening, but there it is.
+        glDisable(GL_BLEND);
 
+        // Because we're using RenderGameOverlayEvent instead of RenderWorldLastEvent, we need to apply the world's
+        // projection and modelview matrices ourselves. Getting access to them is easier said than done. They are stored
+        // in ActiveRenderInfo, and they're private with no methods to access them. We must use reflection.
+        glPushMatrix();
+        glMatrixMode(GL_PROJECTION);
+        glPushMatrix();
+        Field projectionField = null;
+        Field modelviewField = null;
+        try {
+//            projectionField = ActiveRenderInfo.class.getDeclaredField("projection");
+//            modelviewField = ActiveRenderInfo.class.getDeclaredField("modelview");
+            projectionField = ActiveRenderInfo.class.getDeclaredField("field_74595_k");
+            modelviewField = ActiveRenderInfo.class.getDeclaredField("field_74594_j");
+        } catch (NoSuchFieldException e) {
+            HoloInventory.getLogger().error("Could not find matrices.");
+        }
+
+        if (projectionField != null && modelviewField != null) {
+            projectionField.setAccessible(true);
+            modelviewField.setAccessible(true);
+            glMatrixMode(GL_PROJECTION);
+            try {
+                glLoadMatrix((FloatBuffer) projectionField.get(null));
+            } catch (IllegalAccessException ignored) {}
+            glMatrixMode(GL_MODELVIEW);
+            try {
+                glLoadMatrix((FloatBuffer) modelviewField.get(null));
+            } catch (IllegalAccessException ignored) {}
+        }
+
+        // Move to right position and rotate to face the player
         moveAndRotate(-1);
-        
+
         double uiScaleFactor = HoloInventory.getConfig().renderScaling;
         if (uiScaleFactor < 0.1) uiScaleFactor = 0.1;
         glScaled(uiScaleFactor, uiScaleFactor, uiScaleFactor);
@@ -335,7 +369,13 @@ public class Renderer
                 row++;
             }
         }
+        // Undo our changes to the matrices, though the warped UI was hilarious.
+        glMatrixMode(GL_PROJECTION);
         glPopMatrix();
+        glMatrixMode(GL_MODELVIEW);
+        glPopMatrix();
+
+        glEnable(GL_BLEND);
     }
 
     /**
@@ -415,10 +455,14 @@ public class Renderer
         glPushMatrix();
         glTranslatef(maxWith - ((column + 0.2f) * blockScale * 0.6f), maxHeight - ((row + 0.05f) * blockScale * 0.6f), 0f);
         glScalef(blockScale, blockScale, blockScale);
-        if (Minecraft.getMinecraft().gameSettings.fancyGraphics) glRotatef(HoloInventory.getConfig().rotateItems ? timeD : 0f, 0.0F, 1.0F, 0.0F);
-        else glRotatef(RenderManager.instance.playerViewY, 0.0F, 1.0F, 0.0F);
+        // There's some shenanigans going on here with fancyGraphics. It's probably because of Optifine.
+        // If your using shaders then your probably using fancy graphics, so I've just hardcoded it to assume it's set.
+        glRotatef(HoloInventory.getConfig().rotateItems ? timeD : 0f, 0.0F, 1.0F, 0.0F);
         customitem.setEntityItemStack(itemStack);
+        boolean fancy = Minecraft.getMinecraft().gameSettings.fancyGraphics;
+        Minecraft.getMinecraft().gameSettings.fancyGraphics = true;
         ClientHandler.RENDER_ITEM.doRender(customitem, 0, 0, 0, 0, 0);
+        Minecraft.getMinecraft().gameSettings.fancyGraphics = fancy;
         if (itemStack.hasEffect(0)) glDisable(GL_LIGHTING);
         glPopMatrix();
         RenderHelper.disableStandardItemLighting();
